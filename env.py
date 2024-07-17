@@ -91,7 +91,6 @@ class EventCaptureEnv(gym.Env):
         self.total_active_time+=active_time
         prev_hour = self.current_hour
         self.current_hour = s2h(t)
-        next_action = self.choose_action()
         self.Q[prev_hour, action] += self.learning_rate * (reward + self.discount_factor * np.max(self.Q[self.current_hour%24, next_action]) - self.Q[prev_hour, action])
         done = self.current_hour > self.num_hours or self.current_hour==0 or self.current_step > self.max_steps_per_episode
         self.current_step += 1
@@ -166,7 +165,7 @@ if __name__ == "__main__":
     parser.add_argument("--t_int", default=0.1, type=float, help='wake duration')
     parser.add_argument("--weight", default=0.0001, type=float, help='balancing weight')
     parser.add_argument("--n_runs", default=10, type=int, help='number of runs')
-    parser.add_argument("--n_episodes", default=10000, type=int, help='number of episodes')
+    parser.add_argument("--n_episodes", default=1000, type=int, help='number of episodes')
     parser.add_argument("--start_time", default=0.5, type=float, help='start time') # change
     args = parser.parse_args()
 
