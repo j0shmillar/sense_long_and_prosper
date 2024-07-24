@@ -5,7 +5,8 @@ import argparse
 import numpy as np
 from rich.progress import track
 
-ACTIONS = [3, 5, 10, 60, 300, 600, 1800]
+ACTIONS = [3, 5, 60, 300, 1800]
+FIXED = [3,5,7]
 
 def s2h(s):
     return int(((s // 3600) + args.start_time) % 24)
@@ -37,7 +38,7 @@ class EventCaptureEnv(gym.Env):
         self.max_steps_per_episode = max_steps_per_episode
         self.learning_rate = 0.1
         self.discount_factor = 0.9
-        self.epsilon = 0.3
+        self.epsilon = 0.1
         self.Q = np.zeros((self.num_hours, len(ACTIONS))) 
 
         self.current_hour = 0
@@ -77,11 +78,11 @@ class EventCaptureEnv(gym.Env):
                 pos_wake_up+=1
             else:
                 neg_wake_up+=1
-            if t>t_old:
+            if round(t - t_old, 2) > self.T_INT:
                 active_time+=t-t_old 
             else:
-                active_time+=self.T_INT
-                t+=self.T_INT
+                active_time+=self.T_INT+0.03
+                t+=0.03
             total_events_captured+=events_captured
             t+=hourly_wake_up_rate
 
@@ -91,7 +92,7 @@ class EventCaptureEnv(gym.Env):
         self.total_active_time+=active_time
         prev_hour = self.current_hour
         self.current_hour = s2h(t)
-        self.Q[prev_hour, action] += self.learning_rate * (reward + self.discount_factor * np.max(self.Q[self.current_hour%24, next_action]) - self.Q[prev_hour, action])
+        self.Q[prev_hour, action] += self.learning_rate * (reward + self.discount_factor * np.max(self.Q[self.current_hour%24, :]) - self.Q[prev_hour, action])
         done = self.current_hour > self.num_hours or self.current_hour==0 or self.current_step > self.max_steps_per_episode
         self.current_step += 1
         return self.current_hour, reward, done, {}, t
@@ -109,7 +110,7 @@ def fixed(data, START, END, int_action, t_int):
     t = START
     event_starts = np.array(data['start_time'])
     event_ends = np.array(data['end_time'])
-    active_time, total_events_detected = 0, 0
+    active_time, total_events_detected, wasted_time = 0, 0, 0
     pos_wake_up, neg_wake_up = 0, 0
     while t <= END - t_int:
         t_old = t
@@ -119,39 +120,43 @@ def fixed(data, START, END, int_action, t_int):
             pos_wake_up+=1
         else:
             neg_wake_up+=1
-        if t - t_old > t_int:
+        if round(t - t_old, 2) > t_int:
             active_time += t - t_old
         else:
-            t += t_int
-            active_time += t_int
+            t += (0.03)
+            active_time += (t_int+0.03)
+            wasted_time += (t_int+0.03)
         t += int_action
-    return active_time, total_events_detected, pos_wake_up/(pos_wake_up+neg_wake_up), (pos_wake_up+neg_wake_up)
+    return active_time, total_events_detected, pos_wake_up/(pos_wake_up+neg_wake_up), (pos_wake_up+neg_wake_up), wasted_time
 
 def eval(data, q_table, START, END, t_int):
     t = START
     current_hour = s2h(START)
+    prev_hour = current_hour
     event_starts = np.array(data['start_time'])
     event_ends = np.array(data['end_time'])
-    active_time, total_events_detected = 0, 0
+    active_time, total_events_detected, wasted_time = 0, 0, 0
     pos_wake_up, neg_wake_up = 0, 0
     while t <= END - t_int:
-        action = ACTIONS[np.argmax(q_table[current_hour])]
-        while s2h(t)==current_hour:
-            t_old = t
-            t, events_detected = handle_event(t, event_starts, event_ends)
-            if events_detected>0:
-                pos_wake_up+=1
-            else:
-                neg_wake_up+=1
-            if t - t_old > t_int:
-                active_time += t - t_old
-            else:
-                t += t_int
-                active_time += t_int
-            total_events_detected+=events_detected
-            t+=action
         current_hour = s2h(t)
-    return active_time, total_events_detected, pos_wake_up/(pos_wake_up+neg_wake_up), (pos_wake_up+neg_wake_up) 
+        action = ACTIONS[np.argmax(q_table[current_hour])]
+        if current_hour != prev_hour:
+            prev_hour = current_hour
+        t_old = t
+        t, events_detected = handle_event(t, event_starts, event_ends)
+        total_events_detected += events_detected
+        if events_detected>0:
+            pos_wake_up+=1
+        else:
+            neg_wake_up+=1
+        if round(t - t_old, 2) > t_int:
+            active_time += t - t_old
+        else:
+            t += (0.03)
+            active_time += (t_int+0.03)
+            wasted_time += (t_int+0.03)
+        t += action
+    return active_time, total_events_detected, pos_wake_up/(pos_wake_up+neg_wake_up), (pos_wake_up+neg_wake_up), wasted_time
 
 if __name__ == "__main__":
 
@@ -163,16 +168,16 @@ if __name__ == "__main__":
     parser.add_argument("--t_hrs", default=24, type=int, help='train hours')
     parser.add_argument("--v_hrs", default=24, type=int, help='eval hours')
     parser.add_argument("--t_int", default=0.1, type=float, help='wake duration')
-    parser.add_argument("--weight", default=0.0001, type=float, help='balancing weight')
+    parser.add_argument("--weight", default=1e-5, type=float, help='balancing weight')
     parser.add_argument("--n_runs", default=10, type=int, help='number of runs')
-    parser.add_argument("--n_episodes", default=1000, type=int, help='number of episodes')
+    parser.add_argument("--n_episodes", default=30, type=int, help='number of episodes')
     parser.add_argument("--start_time", default=0.5, type=float, help='start time') # change
     args = parser.parse_args()
 
     for _ in range(args.n_runs):
 
         data = pandas.read_csv(args.events)
-        data = data[data['confidence']>=0.7]
+        data = data[data['confidence']>=0.75]
         TRAIN = args.t_hrs * 60 * 60
         data_train = data[(data['start_time'] < TRAIN)]
         EVAL = TRAIN + args.v_hrs * 60 * 60
@@ -193,6 +198,7 @@ if __name__ == "__main__":
                     action = env.choose_action()
                     observation, reward, done, _, t = env.step(action, t, args.weight)
                 q_table_file = args.path
+                env.save_q_table(q_table_file)
             env.save_q_table(q_table_file)
             q_table = np.load(args.path)
         else:
@@ -201,35 +207,35 @@ if __name__ == "__main__":
         total_events = len(data_eval)
         active_time_cont = EVAL_END - EVAL_START
 
-        active_time_eval, total_events_eval, wake_up_ratio, n_wake_ups = eval(data_eval, q_table, EVAL_START, EVAL_END, args.t_int)
+        active_time_eval, total_events_eval, wake_up_ratio, n_wake_ups, wasted_time_eval = eval(data_eval, q_table, EVAL_START, EVAL_END, args.t_int)
 
         print(f"Continuous:\nActive Time = {active_time_cont}, Detected Events = {total_events}")
 
         active_time_3s, total_events_detected_fixed_3s, wake_up_ratio_3s, n_wake_ups_3s = 0,0,0,0
-        for i in [3, 5, 7]:
-            active_time_fixed, total_events_detected_fixed, wake_up_ratio, n_wake_ups_fixed = fixed(data_eval, EVAL_START, EVAL_END, i, args.t_int)
+        for i in FIXED:
+            active_time_fixed, total_events_detected_fixed, wake_up_ratio, n_wake_ups_fixed, wasted_time_fixed = fixed(data_eval, EVAL_START, EVAL_END, i, args.t_int)
             if i == 3:
                 active_time_3s = active_time_fixed
                 total_events_detected_fixed_3s = total_events_detected_fixed
                 n_wake_ups_3s = n_wake_ups_fixed
                 print(f"Fixed {i}s:\nActive Time = {active_time_fixed:.0f}, Detected Events = {total_events_detected_fixed}, Detected Events % = {total_events_detected_fixed/len(data_eval)*100:.2f}")
                 print(f"N Wake ups = {n_wake_ups_fixed}")
-                data_to_append = [active_time_fixed, total_events_detected_fixed/len(data_eval), n_wake_ups_fixed]
+                data_to_append = [active_time_fixed, total_events_detected_fixed/len(data_eval), n_wake_ups_fixed, wasted_time_fixed]
                 write_results(f'fixed_{i}.csv', data_to_append)     
             else:
                 print(f"Fixed {i}s:\nActive Time = {active_time_fixed:.0f}, Active Time % = {(active_time_fixed/active_time_3s)*100:.2f}, Detected Events = {total_events_detected_fixed}, Detected Events % = {(total_events_detected_fixed/len(data_eval))*100:.2f}")
                 print(f"N Wake ups = {n_wake_ups_fixed}")
                 print(f"N Wakes ups % = {((n_wake_ups_fixed)/n_wake_ups_3s)*100:.2f}")
-                data_to_append = [active_time_fixed, (active_time_fixed/active_time_3s)*100, (total_events_detected_fixed/len(data_eval))*100, (n_wake_ups_fixed/n_wake_ups_3s)*100]
-                write_results(f'fixed_{i}.csv', data_to_append)
+                data_to_append = [active_time_fixed, (active_time_fixed/active_time_3s)*100, (total_events_detected_fixed/len(data_eval))*100, (n_wake_ups_fixed/n_wake_ups_3s)*100, wasted_time_fixed]
+                data_to_append = [active_time_fixed, (active_time_fixed/active_time_3s)*100, (total_events_detected_fixed/len(data_eval))*100]
+                write_results(f'fixed_{i}.csv', data_to_append)    
 
         print(f"QL:\nActive Time = {active_time_eval:.0f}, Active Time % = {(active_time_eval/active_time_3s)*100:.2f}, Detected Events = {total_events_eval}, Detected Events % = {(total_events_eval/len(data_eval))*100:.2f}")
         print(f"N Wake ups = {n_wake_ups}")
         print(f"N Wakes ups % = {((n_wake_ups)/n_wake_ups_3s)*100:.2f}")
 
-        data_to_append = [active_time_eval, (active_time_eval/active_time_3s)*100, (total_events_eval/len(data_eval))*100, (n_wake_ups/n_wake_ups_3s)*100]
+        data_to_append = [active_time_eval, (active_time_eval/active_time_3s)*100, (total_events_eval/len(data_eval))*100, (n_wake_ups/n_wake_ups_3s)*100, wasted_time_eval]
         write_results(f'ql.csv', data_to_append)
 
         env.close()
-
 
